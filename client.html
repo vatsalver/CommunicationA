@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Go WebSocket Group Video Call Demo</title>
+  <style>
+    #videos { display: flex; flex-wrap: wrap; gap: 12px;}
+    video { width:300px; height:225px; background:#222;}
+  </style>
+</head>
+<body>
+  <h2>Go WebRTC Group Video Call</h2>
+  <div>
+    <label>Your Username:</label>
+    <input id="username" placeholder="alice">
+    <button onclick="connect()">Connect</button>
+  </div>
+  <div style="margin-top:10px;">
+    <label>Group Name:</label>
+    <input id="groupName" placeholder="room1">
+    <button onclick="joinGroup()">Join Group</button>
+    <button onclick="startGroupCall()">Start Group Call</button>
+  </div>
+  <div id="videos" style="margin-top:15px;"></div>
+
+<script>
+let ws, myName, group;
+let peerConnections = {}; // peerID -> RTCPeerConnection
+let streams = {};
+
+function connect() {
+  myName = document.getElementById('username').value.trim();
+  if (!myName) return alert("Enter username!");
+  ws = new WebSocket("ws://localhost:8080/ws");
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "register", from: myName }));
+    log("Connected as " + myName);
+  };
+  ws.onmessage = handleMessage;
+}
+function joinGroup() {
+  group = document.getElementById('groupName').value.trim();
+  if (!group) return alert("Enter group name!");
+  ws.send(JSON.stringify({ type: "join_group", from: myName, group }));
+  log("Joined group: " + group);
+}
+function startGroupCall() {
+  if (!group) return alert("Join group first!");
+  ws.send(JSON.stringify({ type: "group", from: myName, group, content: "__start_group_call__" }));
+  log("Started group call in " + group);
+}
+
+async function handleMessage(event) {
+  const msg = JSON.parse(event.data);
+
+  // System messages
+  if (msg.type === "system") {
+    log("[System]: " + msg.content); return;
+  }
+
+  // Handle group call signaling
+  if (msg.type === "group" && msg.group === group && msg.content === "__start_group_call__") {
+    if (msg.from !== myName) await sendOffer(msg.from);
+  }
+  else if (msg.type === "video_offer" && msg.group === group && msg.to === myName) {
+    await receiveOffer(msg);
+  }
+  else if (msg.type === "video_answer" && msg.group === group && msg.to === myName) {
+    await peerConnections[msg.from]?.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+    log(`Received answer from ${msg.from}`);
+  }
+  else if (msg.type === "ice_candidate" && msg.group === group && msg.to === myName) {
+    try {
+      await peerConnections[msg.from]?.addIceCandidate(JSON.parse(msg.candidate));
+      // log(`Added ICE from ${msg.from}`);
+    } catch {}
+  }
+}
+
+// ------------ WebRTC per-peer logic ------------
+async function sendOffer(peer) {
+  await setupLocalStream();
+  createPeerConnection(peer);
+  const pc = peerConnections[peer];
+  if (!pc) return;
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  ws.send(JSON.stringify({
+    type: "video_offer",
+    from: myName,
+    to: peer,
+    group,
+    sdp: offer.sdp
+  }));
+  log(`Sent offer to ${peer}`);
+}
+async function receiveOffer(msg) {
+  await setupLocalStream();
+  createPeerConnection(msg.from);
+  const pc = peerConnections[msg.from];
+  if (!pc) return;
+  await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  ws.send(JSON.stringify({
+    type: "video_answer",
+    from: myName,
+    to: msg.from,
+    group,
+    sdp: answer.sdp
+  }));
+  log(`Sent answer to ${msg.from}`);
+}
+function createPeerConnection(peer) {
+  if (peerConnections[peer]) return;
+  const pc = new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+  });
+  peerConnections[peer] = pc;
+
+  // Add my local tracks
+  if (streams.local) streams.local.getTracks().forEach(track => pc.addTrack(track, streams.local));
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      ws.send(JSON.stringify({
+        type: "ice_candidate",
+        from: myName,
+        to: peer,
+        group,
+        candidate: JSON.stringify(e.candidate)
+      }));
+    }
+  };
+  pc.ontrack = (e) => {
+    if (!streams[peer]) {
+      streams[peer] = new MediaStream();
+      addRemoteVideo(peer, streams[peer]);
+    }
+    e.streams[0].getTracks().forEach(track => streams[peer].addTrack(track));
+  };
+}
+async function setupLocalStream() {
+  if (streams.local) return;
+  streams.local = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  addRemoteVideo('(me)', streams.local, true);
+}
+function addRemoteVideo(label, stream, mute) {
+  let video = document.getElementById("video_" + label);
+  if (!video) {
+    video = document.createElement("video");
+    video.id = "video_" + label;
+    video.autoplay = true;
+    video.playsInline = true;
+    if (mute) video.muted = true;
+    document.getElementById("videos").appendChild(video);
+    const cap = document.createElement('span');
+    cap.textContent = label;
+    video.after(cap);
+  }
+  video.srcObject = stream;
+}
+
+// Util
+function log(msg){console.log(msg);}
+</script>
+</body>
+</html>

@@ -4,30 +4,29 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// ----- Global State -----
-
-var clients = make(map[*websocket.Conn]bool)     // WebSocket connections
+var clients = make(map[*websocket.Conn]bool)
 var userSockets = make(map[string]*websocket.Conn) // userID -> WebSocket
-var groups = make(map[string][]string)           // groupID -> list of userIDs
+var groups = make(map[string][]string)             // groupID -> []userIDs
 
-var broadcast = make(chan Message, 8) // Outgoing messages
+var broadcast = make(chan Message, 8)
 
-// ----- Message Structure -----
 type Message struct {
-	Type    string `json:"type"`    // broadcast, dm, group, create_group, join_group, register
-	From    string `json:"from"`    // Sender userID
-	To      string `json:"to"`      // Recipient userID (for DM)
-	Group   string `json:"group"`   // Group name (for group chat)
-	Content string `json:"content"` // Text message
+	Type      string `json:"type"`      // broadcast, dm, group, create_group, join_group, register
+	From      string `json:"from"`      // sender
+	To        string `json:"to"`        // for dm or p2p calls
+	Group     string `json:"group"`     // group name
+	Content   string `json:"content"`   // text
+	SDP       string `json:"sdp"`       // offer/answer payload
+	Candidate string `json:"candidate"` // ICE candidate JSON
 }
 
-// ----- Message Router -----
 func handleMessages() {
 	for {
 		msg := <-broadcast
 
 		switch msg.Type {
 
+		// Existing Messaging Functions
 		case "broadcast":
 			for client := range clients {
 				client.WriteJSON(msg)
@@ -48,7 +47,6 @@ func handleMessages() {
 
 		case "join_group":
 			if _, exists := groups[msg.Group]; exists {
-				// Avoid duplicates
 				for _, m := range groups[msg.Group] {
 					if m == msg.From {
 						return
@@ -65,6 +63,42 @@ func handleMessages() {
 				for _, memberID := range members {
 					if conn, connected := userSockets[memberID]; connected {
 						conn.WriteJSON(msg)
+					}
+				}
+			}
+
+		// New: WebRTC Signaling
+		case "start_video":
+			// Notify target or group
+			if msg.To != "" {
+				if target, ok := userSockets[msg.To]; ok {
+					target.WriteJSON(msg)
+				}
+			} else if msg.Group != "" {
+				if members, ok := groups[msg.Group]; ok {
+					for _, memberID := range members {
+						if memberID != msg.From {
+							if conn, connected := userSockets[memberID]; connected {
+								conn.WriteJSON(msg)
+							}
+						}
+					}
+				}
+			}
+
+		case "video_offer", "video_answer", "ice_candidate":
+			if msg.To != "" {
+				if target, ok := userSockets[msg.To]; ok {
+					target.WriteJSON(msg)
+				}
+			} else if msg.Group != "" {
+				if members, ok := groups[msg.Group]; ok {
+					for _, memberID := range members {
+						if memberID != msg.From {
+							if conn, connected := userSockets[memberID]; connected {
+								conn.WriteJSON(msg)
+							}
+						}
 					}
 				}
 			}
